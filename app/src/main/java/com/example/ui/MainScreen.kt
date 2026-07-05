@@ -32,6 +32,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -398,6 +399,70 @@ fun DownloaderTab(viewModel: MainViewModel) {
             }
         }
 
+        // Live Diagnostics Panel
+        item {
+            val lastLogs by viewModel.lastDownloadLogs.collectAsStateWithLifecycle()
+            if (downloadState !is MainViewModel.DownloadState.Idle && lastLogs.isNotEmpty()) {
+                var logsExpanded by remember { mutableStateOf(true) }
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    colors = CardDefaults.cardColors(containerColor = ElegantCard),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { logsExpanded = !logsExpanded },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Icon(Icons.Default.BugReport, contentDescription = null, tint = ElegantAccent, modifier = Modifier.size(18.dp))
+                                Text("Live Execution Log", color = ElegantTextLight, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                            Icon(
+                                imageVector = if (logsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = ElegantTextMuted,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        
+                        if (logsExpanded) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 180.dp)
+                                    .background(ElegantSecondaryCard, RoundedCornerShape(8.dp))
+                                    .border(BorderStroke(1.dp, ElegantOutline.copy(alpha = 0.3f)), RoundedCornerShape(8.dp))
+                                    .padding(10.dp)
+                            ) {
+                                val scrollState = rememberScrollState()
+                                LaunchedEffect(lastLogs.size) {
+                                    scrollState.animateScrollTo(scrollState.maxValue)
+                                }
+                                Column(
+                                    modifier = Modifier
+                                        .verticalScroll(scrollState)
+                                        .fillMaxWidth()
+                                ) {
+                                    lastLogs.forEach { log ->
+                                        Text(
+                                            text = log,
+                                            color = if (log.contains("FAILED") || log.contains("Error") || log.contains("exception", ignoreCase = true)) Color(0xFFF2B8B5) else ElegantTextMuted,
+                                            fontSize = 11.sp,
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                            modifier = Modifier.padding(vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Help guides
         item {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -452,6 +517,7 @@ fun DownloaderTab(viewModel: MainViewModel) {
         item {
             var expanded by remember { mutableStateOf(false) }
             val currentEngineUrl by viewModel.cobaltEngineUrl.collectAsStateWithLifecycle()
+            val latencies by viewModel.serverLatencies.collectAsStateWithLifecycle()
             
             Card(
                 modifier = Modifier
@@ -495,12 +561,27 @@ fun DownloaderTab(viewModel: MainViewModel) {
                     if (expanded) {
                         Spacer(modifier = Modifier.height(16.dp))
                         
-                        Text(
-                            "Preferred Cobalt Instance:",
-                            color = ElegantTextLight,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 13.sp
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Preferred Cobalt Instance:",
+                                color = ElegantTextLight,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                            TextButton(
+                                onClick = { viewModel.testServerLatencies() },
+                                colors = ButtonDefaults.textButtonColors(contentColor = ElegantAccent),
+                                modifier = Modifier.height(28.dp).padding(0.dp)
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Ping", modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Ping Engines", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         
                         val standardInstances = listOf(
@@ -517,7 +598,7 @@ fun DownloaderTab(viewModel: MainViewModel) {
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { viewModel.setCobaltEngineUrl(value) }
-                                    .padding(vertical = 8.dp),
+                                    .padding(vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 RadioButton(
@@ -526,10 +607,30 @@ fun DownloaderTab(viewModel: MainViewModel) {
                                     colors = RadioButtonDefaults.colors(
                                         selectedColor = ElegantAccent,
                                         unselectedColor = ElegantOutline
-                                    )
+                                    ),
+                                    modifier = Modifier.scale(0.85f)
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text(name, color = ElegantTextLight, fontSize = 13.sp)
+                                
+                                val latency = latencies[value]
+                                if (latency != null) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    val badgeColor = when {
+                                        latency == "Testing..." -> ElegantTextMuted
+                                        latency == "Offline" || latency.startsWith("HTTP") -> Color(0xFFF2B8B5)
+                                        else -> ElegantAccent
+                                    }
+                                    Text(
+                                        text = latency,
+                                        color = badgeColor,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .background(ElegantSecondaryCard, RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                         }
                         
@@ -573,6 +674,129 @@ fun DownloaderTab(viewModel: MainViewModel) {
                             fontSize = 11.sp,
                             color = ElegantTextMuted,
                             lineHeight = 15.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Divider(color = ElegantOutline.copy(alpha = 0.4f))
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // HTTP 403 Forbidden Bypassing options (User-Agent and Cookies)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Security, contentDescription = "Security Bypass", tint = ElegantAccent, modifier = Modifier.size(18.dp))
+                            Text(
+                                "HTTP 403 / CDN Bypass Options",
+                                fontWeight = FontWeight.Bold,
+                                color = ElegantTextLight,
+                                fontSize = 13.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "Spoof client headers to bypass security rules or rate-limits on hosting platforms:",
+                            fontSize = 11.sp,
+                            color = ElegantTextMuted,
+                            lineHeight = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        val currentUaPreset by viewModel.userAgentPreset.collectAsStateWithLifecycle()
+                        val currentCustomUa by viewModel.customUserAgent.collectAsStateWithLifecycle()
+                        val currentCookies by viewModel.customCookies.collectAsStateWithLifecycle()
+
+                        Text(
+                            "User-Agent Spoofing Preset:",
+                            color = ElegantTextLight,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        val uaPresets = listOf(
+                            "Standard Browser (Chrome)" to "default",
+                            "iOS Safari Mobile" to "mobile_safari",
+                            "Instagram App Spoof" to "instagram_app",
+                            "TikTok App Spoof" to "tiktok_app",
+                            "Search Engine Bot" to "googlebot",
+                            "Custom User-Agent String" to "custom"
+                        )
+
+                        uaPresets.forEach { (name, value) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { viewModel.setUserAgentPreset(value) }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = currentUaPreset == value,
+                                    onClick = { viewModel.setUserAgentPreset(value) },
+                                    colors = RadioButtonDefaults.colors(
+                                        selectedColor = ElegantAccent,
+                                        unselectedColor = ElegantOutline
+                                    ),
+                                    modifier = Modifier.scale(0.85f)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(name, color = ElegantTextLight, fontSize = 12.sp)
+                            }
+                        }
+
+                        if (currentUaPreset == "custom") {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = currentCustomUa,
+                                onValueChange = { viewModel.setCustomUserAgent(it) },
+                                label = { Text("Custom User-Agent Header", color = ElegantTextMuted) },
+                                placeholder = { Text("Mozilla/5.0 ...", color = ElegantTextMuted) },
+                                modifier = Modifier.fillMaxWidth(),
+                                maxLines = 3,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = ElegantTextLight,
+                                    unfocusedTextColor = ElegantTextLight,
+                                    focusedBorderColor = ElegantAccent,
+                                    unfocusedBorderColor = ElegantOutline,
+                                    focusedContainerColor = ElegantSecondaryCard,
+                                    unfocusedContainerColor = ElegantSecondaryCard
+                                )
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text(
+                            "Custom Session Cookies (Optional):",
+                            color = ElegantTextLight,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Supply active session cookies (e.g. key=value; key2=value2) to bypass age verification or platform geo-restrictions.",
+                            fontSize = 11.sp,
+                            color = ElegantTextMuted,
+                            lineHeight = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedTextField(
+                            value = currentCookies,
+                            onValueChange = { viewModel.setCustomCookies(it) },
+                            label = { Text("Session Cookies", color = ElegantTextMuted) },
+                            placeholder = { Text("session_id=xyz; auth_token=abc", color = ElegantTextMuted) },
+                            modifier = Modifier.fillMaxWidth(),
+                            maxLines = 3,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = ElegantTextLight,
+                                unfocusedTextColor = ElegantTextLight,
+                                focusedBorderColor = ElegantAccent,
+                                unfocusedBorderColor = ElegantOutline,
+                                focusedContainerColor = ElegantSecondaryCard,
+                                unfocusedContainerColor = ElegantSecondaryCard
+                            )
                         )
                     }
                 }

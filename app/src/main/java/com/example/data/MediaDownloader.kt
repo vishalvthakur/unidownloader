@@ -13,6 +13,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -26,6 +30,20 @@ import java.util.concurrent.TimeUnit
 
 object MediaDownloader {
     private const val TAG = "MediaDownloader"
+
+    private val _lastDownloadLogs = MutableStateFlow<List<String>>(emptyList())
+    val lastDownloadLogs: StateFlow<List<String>> = _lastDownloadLogs.asStateFlow()
+
+    fun clearLogs() {
+        _lastDownloadLogs.value = emptyList()
+    }
+
+    fun addLog(message: String) {
+        val current = _lastDownloadLogs.value.toMutableList()
+        current.add(message)
+        _lastDownloadLogs.value = current
+        Log.d(TAG, "[Diag] $message")
+    }
     
     private val apiClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -68,6 +86,7 @@ object MediaDownloader {
     }
 
     private suspend fun fetchActiveInstances(targetService: String? = null): List<String> = withContext(Dispatchers.IO) {
+        addLog("Retrieving public Cobalt instance directories...")
         val defaultInstances = listOf(
             "https://dog.kittycat.boo/",
             "https://api.cobalt.liubquanti.click/",
@@ -238,41 +257,51 @@ object MediaDownloader {
         preferredEngineUrl: String = "auto",
         onProgress: (progress: Int, bytesRead: Long, totalBytes: Long) -> Unit = { _, _, _ -> }
     ): DownloadResult = withContext(Dispatchers.IO) {
+        clearLogs()
         val trimmedUrl = url.trim()
+        addLog("Initiating media download workflow for: $trimmedUrl")
         if (trimmedUrl.isEmpty()) {
+            addLog("Error: Input URL is empty")
             return@withContext DownloadResult.Error("URL is empty")
         }
 
         val targetService = deduceService(trimmedUrl)
+        addLog("Deduced service provider: ${targetService ?: "Generic / Unknown"}")
 
         // Resolve list of base instances to try
         val instances = mutableListOf<String>()
         if (preferredEngineUrl != "auto" && preferredEngineUrl.isNotEmpty()) {
             val cleanPref = if (preferredEngineUrl.endsWith("/")) preferredEngineUrl else "$preferredEngineUrl/"
             instances.add(cleanPref)
+            addLog("Adding user-preferred server: $cleanPref")
         }
         
         // Add dynamic/default fallback instances to the pool sorted by capability
         val fetched = fetchActiveInstances(targetService)
+        addLog("Found ${fetched.size} active servers from directory scan.")
         for (f in fetched) {
             if (!instances.contains(f)) {
                 instances.add(f)
             }
         }
 
+        addLog("Configured server fallback pool: $instances")
         var lastError = "No working Cobalt server could process this download request."
         
         for (baseUrl in instances) {
-            Log.d(TAG, "Attempting download using server: $baseUrl")
+            addLog("Attempting request using server: $baseUrl")
             
             // Try different payload formats for the current instance (from strict to compatible)
             for (payloadAttempt in 0..2) {
+                addLog("Sending API request to $baseUrl (Payload variant index: $payloadAttempt)...")
                 val result = makeSingleRequest(context, baseUrl, trimmedUrl, repository, payloadAttempt, onProgress)
                 when (result) {
                     is DownloadResult.Success -> {
+                        addLog("SUCCESS: Download completed successfully from $baseUrl! Output: ${result.fileName}")
                         return@withContext result
                     }
                     is DownloadResult.Error -> {
+                        addLog("API Error on $baseUrl (Payload variant index: $payloadAttempt): ${result.message}")
                         val isInfra = isInfrastructureError(result.message)
                         if (!isInfra || lastError.isEmpty() || isInfrastructureError(lastError) || lastError.contains("No working Cobalt server")) {
                             lastError = result.message
@@ -286,12 +315,14 @@ object MediaDownloader {
                                                      lowerMsg.contains("error.api.service.disabled")
 
                         if (isPermanentServiceError) {
+                            addLog("Server $baseUrl returned permanent restriction. Skipping other payload variants...")
                             // Immediately break out and try next server instead of wasting time with other payload attempts here
                             break
                         }
 
                         // If the error is NOT a 400 bad request, don't waste time with other payload attempts on this server; try next server
                         if (!result.message.contains("HTTP 400") && !result.message.contains("Server error: HTTP 400")) {
+                            addLog("Server $baseUrl returned transient/network error. Trying next server...")
                             break
                         }
                     }
@@ -299,6 +330,7 @@ object MediaDownloader {
             }
         }
         
+        addLog("FAILED: All fallback servers were tried. Last received error: $lastError")
         return@withContext DownloadResult.Error(lastError)
     }
 
@@ -328,88 +360,156 @@ object MediaDownloader {
                 put("url", url)
                 when (payloadAttempt) {
                     0 -> {
-                        // Standard highly compatible Cobalt payload (matching default docs)
+                        // modern highly-compatible config (tunnelling active, high compatibility resolution)
                         put("videoQuality", "1080")
                         put("downloadMode", "auto")
+                        put("alwaysProxy", true)
                     }
                     1 -> {
-                        // Max quality Cobalt payload
+                        // direct stream fallback with max quality
                         put("videoQuality", "max")
                         put("downloadMode", "auto")
+                        put("alwaysProxy", false)
                     }
                     2 -> {
-                        // Minimalist payload: Only URL (maximum fallback compatibility)
+                        // minimalist payload
                     }
                 }
             }
 
-            val request = Request.Builder()
+            val uri = Uri.parse(baseUrl)
+            val host = uri.host ?: ""
+
+            val requestBuilder = Request.Builder()
                 .url(baseUrl)
                 .post(jsonBody.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .header("Origin", "https://cobalt.tools")
-                .header("Referer", "https://cobalt.tools/")
-                .build()
 
-            apiClient.newCall(request).execute().use { response ->
-                val responseBodyStr = response.body?.string() ?: ""
-                
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Server $baseUrl (attempt $payloadAttempt) returned error ${response.code}: $responseBodyStr")
-                    
-                    var errorDetails = "HTTP ${response.code}"
-                    try {
-                        val errJson = org.json.JSONObject(responseBodyStr)
-                        val errText = errJson.optString("text", "")
-                        if (errText.isNotEmpty()) {
-                            errorDetails = errText
-                        } else {
-                            val errMsg = errJson.optString("message", "")
-                            if (errMsg.isNotEmpty()) errorDetails = errMsg
-                        }
-                    } catch (_: Exception) {}
-                    
-                    return@withContext DownloadResult.Error("Server error: HTTP ${response.code} ($errorDetails)")
-                }
-
-                val jsonResponse = org.json.JSONObject(responseBodyStr)
-                val status = jsonResponse.optString("status", "error")
-                if (status == "error") {
-                    val errorText = jsonResponse.optString("text", "Unknown API error")
-                    return@withContext DownloadResult.Error("Server error text: $errorText")
-                }
-
-                when (status) {
-                    "stream", "redirect" -> {
-                        val streamUrl = jsonResponse.getString("url")
-                        val filename = jsonResponse.optString("filename", "download_${System.currentTimeMillis()}")
-                        return@withContext downloadDirectFile(context, streamUrl, filename, url, repository, onProgress)
+            when (payloadAttempt) {
+                0 -> {
+                    // Match the host of the instance itself to bypass strict CORS Origin/Referer WAF filters
+                    if (host.isNotEmpty()) {
+                        requestBuilder.header("Origin", "https://$host")
+                        requestBuilder.header("Referer", "https://$host/")
                     }
-                    "picker" -> {
-                        val pickerArray = jsonResponse.optJSONArray("picker")
-                        if (pickerArray != null && pickerArray.length() > 0) {
-                            var firstSuccess: DownloadResult? = null
-                            for (i in 0 until pickerArray.length()) {
-                                val item = pickerArray.getJSONObject(i)
-                                val itemUrl = item.getString("url")
-                                val type = item.optString("type", "photo")
-                                val ext = if (type == "video") "mp4" else "jpg"
-                                val filename = "slide_${i + 1}_${System.currentTimeMillis()}.$ext"
-                                val res = downloadDirectFile(context, itemUrl, filename, url, repository, onProgress)
-                                if (i == 0) firstSuccess = res
+                }
+                1 -> {
+                    // No Origin/Referer header (standard direct REST style to bypass CORS check entirely)
+                }
+                2 -> {
+                    // Standard cobalt.tools headers for instances restricted to cobalt.tools domain
+                    requestBuilder.header("Origin", "https://cobalt.tools")
+                    requestBuilder.header("Referer", "https://cobalt.tools/")
+                }
+            }
+
+            var attempt = 0
+            val maxAttempts = 3
+            var currentDelay = 1000L
+            var lastResult: DownloadResult? = null
+
+            while (attempt < maxAttempts) {
+                try {
+                    val request = requestBuilder.build()
+                    val result = apiClient.newCall(request).execute().use { response ->
+                        val responseBodyStr = response.body?.string() ?: ""
+                        
+                        if (!response.isSuccessful) {
+                            Log.e(TAG, "Server $baseUrl (attempt $payloadAttempt, retry $attempt) returned error ${response.code}: $responseBodyStr")
+                            
+                            val diagnostics = diagnoseHttpFailure(baseUrl, response.code, response.headers, responseBodyStr)
+                            addLog(diagnostics)
+
+                            var errorDetails = "HTTP ${response.code}"
+                            try {
+                                val errJson = org.json.JSONObject(responseBodyStr)
+                                val errText = errJson.optString("text", "")
+                                if (errText.isNotEmpty()) {
+                                    errorDetails = errText
+                                } else {
+                                    val errMsg = errJson.optString("message", "")
+                                    if (errMsg.isNotEmpty()) errorDetails = errMsg
+                                }
+                            } catch (_: Exception) {}
+                            
+                            DownloadResult.Error("Server error: HTTP ${response.code} ($errorDetails)")
+                        } else {
+                            val jsonResponse = org.json.JSONObject(responseBodyStr)
+                            val status = jsonResponse.optString("status", "error")
+                            if (status == "error") {
+                                val errorText = jsonResponse.optString("text", "Unknown API error")
+                                DownloadResult.Error("Server error text: $errorText")
+                            } else {
+                                when (status) {
+                                    "stream", "redirect" -> {
+                                        val streamUrl = jsonResponse.getString("url")
+                                        val filename = jsonResponse.optString("filename", "download_${System.currentTimeMillis()}")
+                                        downloadDirectFile(context, streamUrl, filename, url, repository, onProgress)
+                                    }
+                                    "picker" -> {
+                                        val pickerArray = jsonResponse.optJSONArray("picker")
+                                        if (pickerArray != null && pickerArray.length() > 0) {
+                                            var firstSuccess: DownloadResult? = null
+                                            for (i in 0 until pickerArray.length()) {
+                                                val item = pickerArray.getJSONObject(i)
+                                                val itemUrl = item.getString("url")
+                                                val type = item.optString("type", "photo")
+                                                val ext = if (type == "video") "mp4" else "jpg"
+                                                val filename = "slide_${i + 1}_${System.currentTimeMillis()}.$ext"
+                                                val res = downloadDirectFile(context, itemUrl, filename, url, repository, onProgress)
+                                                if (i == 0) firstSuccess = res
+                                            }
+                                            firstSuccess ?: DownloadResult.Error("Failed to download picker slides")
+                                        } else {
+                                            DownloadResult.Error("Picker mode returned empty list")
+                                        }
+                                    }
+                                    else -> {
+                                        DownloadResult.Error("Unsupported Cobalt response status: $status")
+                                    }
+                                }
                             }
-                            return@withContext firstSuccess ?: DownloadResult.Error("Failed to download picker slides")
-                        } else {
-                            return@withContext DownloadResult.Error("Picker mode returned empty list")
                         }
                     }
-                    else -> {
-                        return@withContext DownloadResult.Error("Unsupported Cobalt response status: $status")
+
+                    when (result) {
+                        is DownloadResult.Success -> {
+                            return@withContext result
+                        }
+                        is DownloadResult.Error -> {
+                            lastResult = result
+                            val is403Or400 = result.message.contains("HTTP 403") || 
+                                             result.message.contains("HTTP 400") || 
+                                             result.message.contains("Forbidden") || 
+                                             result.message.contains("Bad Request")
+
+                            if (is403Or400) {
+                                attempt++
+                                if (attempt < maxAttempts) {
+                                    addLog("Cobalt API returned 403/400 (Attempt $attempt/$maxAttempts). Retrying in ${currentDelay}ms using exponential backoff...")
+                                    delay(currentDelay)
+                                    currentDelay = (currentDelay * 2.0).toLong()
+                                }
+                            } else {
+                                return@withContext result
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    addLog("Exception during API request (Attempt $attempt/$maxAttempts): ${e.localizedMessage}")
+                    val errResult = DownloadResult.Error(e.localizedMessage ?: "Network communication error on $baseUrl")
+                    lastResult = errResult
+                    attempt++
+                    if (attempt < maxAttempts) {
+                        addLog("Exception encountered. Retrying in ${currentDelay}ms using exponential backoff...")
+                        delay(currentDelay)
+                        currentDelay = (currentDelay * 2.0).toLong()
                     }
                 }
             }
+            return@withContext lastResult ?: DownloadResult.Error("API request to $baseUrl failed")
         } catch (e: Exception) {
             Log.e(TAG, "Error in makeSingleRequest on $baseUrl (attempt $payloadAttempt)", e)
             return@withContext DownloadResult.Error(e.localizedMessage ?: "Network communication error on $baseUrl")
@@ -426,16 +526,112 @@ object MediaDownloader {
     ): DownloadResult = withContext(Dispatchers.IO) {
         try {
             Log.d(TAG, "Downloading direct stream URL: $fileUrl")
-            val request = Request.Builder()
-                .url(fileUrl)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .build()
-            downloadClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return@withContext DownloadResult.Error("Failed to fetch stream content: ${response.code}")
-                }
+            
+            // User-Agent and Session Cookie Spoofing/Bypass Engine
+            val prefs = context.getSharedPreferences("downloader_prefs", Context.MODE_PRIVATE)
+            val uaPreset = prefs.getString("user_agent_preset", "default") ?: "default"
+            val customUa = prefs.getString("custom_user_agent", "") ?: ""
+            val cookiesStr = prefs.getString("custom_cookies", "") ?: ""
 
-                val responseBody = response.body ?: return@withContext DownloadResult.Error("Direct stream was empty")
+            val finalUserAgent = when (uaPreset) {
+                "mobile_safari" -> "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
+                "instagram_app" -> "Instagram 311.0.0.32.118 Android (33/13; 480dpi; 1080x2256; OnePlus; CPH2449; OP593DL1; qcom; en_US; 541344497)"
+                "tiktok_app" -> "TikTok 32.5.3 com.zhiliaoapp.musically/320503 (Linux; U; Android 13; en_US; Pixel 7 Pro; Build/TQ3A.230705.003; Cronet/TT-NetVersion:81734688)"
+                "googlebot" -> "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+                "custom" -> if (customUa.isNotEmpty()) customUa else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                else -> "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+
+            val requestBuilder = Request.Builder()
+                .url(fileUrl)
+                .header("User-Agent", finalUserAgent)
+                .header("Accept", "*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Connection", "keep-alive")
+
+            if (cookiesStr.isNotEmpty()) {
+                requestBuilder.header("Cookie", cookiesStr)
+            }
+
+            // Set dynamic Origin/Referer to mimic target platform request characteristics
+            try {
+                val originalUri = Uri.parse(originalUrl)
+                val originalHost = originalUri.host
+                if (originalHost != null) {
+                    val protocol = if (originalUrl.startsWith("https")) "https" else "http"
+                    requestBuilder.header("Referer", "$protocol://$originalHost/")
+                    requestBuilder.header("Origin", "$protocol://$originalHost")
+                }
+            } catch (ex: Exception) {
+                Log.w(TAG, "Failed to parse original URL to set Referer/Origin headers", ex)
+            }
+
+            addLog("Preparing headers for direct stream payload fetch...")
+            addLog("Using User-Agent: $finalUserAgent")
+            if (cookiesStr.isNotEmpty()) {
+                addLog("Using custom session cookies")
+            }
+
+            val request = requestBuilder.build()
+            var attempt = 0
+            val maxAttempts = 3
+            var currentDelay = 1000L
+            var response: okhttp3.Response? = null
+            var errorResult: DownloadResult.Error? = null
+
+            while (attempt < maxAttempts) {
+                try {
+                    addLog("Requesting stream source: $fileUrl (Attempt ${attempt + 1}/$maxAttempts)...")
+                    val resp = downloadClient.newCall(request).execute()
+                    if (resp.isSuccessful) {
+                        addLog("Direct stream connection established: HTTP ${resp.code}")
+                        response = resp
+                        break
+                    } else {
+                        val code = resp.code
+                        val headers = resp.headers
+                        val errBody = try {
+                            resp.body?.string() ?: ""
+                        } catch (_: Exception) {
+                            ""
+                        }
+                        resp.close()
+                        
+                        addLog("Direct stream responded with HTTP $code on attempt $attempt")
+                        val diagnostics = diagnoseHttpFailure(fileUrl, code, headers, errBody)
+                        addLog(diagnostics)
+                        
+                        errorResult = DownloadResult.Error("Failed to fetch stream content: $code")
+                        if (code == 400 || code == 403) {
+                            attempt++
+                            if (attempt < maxAttempts) {
+                                addLog("Transient status $code. Retrying in ${currentDelay}ms using exponential backoff...")
+                                delay(currentDelay)
+                                currentDelay = (currentDelay * 2.0).toLong()
+                            }
+                        } else {
+                            return@withContext errorResult
+                        }
+                    }
+                } catch (e: Exception) {
+                    addLog("Direct download exception (Attempt $attempt/$maxAttempts): ${e.localizedMessage}")
+                    errorResult = DownloadResult.Error("Failed to download file payload: ${e.localizedMessage}")
+                    attempt++
+                    if (attempt < maxAttempts) {
+                        addLog("Retrying direct download in ${currentDelay}ms using exponential backoff...")
+                        delay(currentDelay)
+                        currentDelay = (currentDelay * 2.0).toLong()
+                    }
+                }
+            }
+
+            if (response == null || !response.isSuccessful) {
+                addLog("Direct stream download failed after $maxAttempts attempts.")
+                return@withContext errorResult ?: DownloadResult.Error("Failed to fetch stream content after retries")
+            }
+
+            response.use { resp ->
+                val responseBody = resp.body ?: return@withContext DownloadResult.Error("Direct stream was empty")
                 val totalBytes = responseBody.contentLength()
                 val inputStream = responseBody.byteStream()
 
@@ -463,8 +659,9 @@ object MediaDownloader {
                 }
 
                 val savedUri = saveToMediaStore(context, inputStream, cleanFilename, mediaCategory, totalBytes, onProgress)
-                    ?: return@withContext DownloadResult.Error("Failed to write file to storage")
+                    ?: return@withContext DownloadResult.Error("Failed to write file to storage").also { addLog("Failed to write stream payload to Android storage / MediaStore.") }
 
+                addLog("File successfully saved to Android gallery: $cleanFilename")
                 val actualPath = savedUri.toString()
                 
                 // Deduce Platform
@@ -602,5 +799,113 @@ object MediaDownloader {
                 if (idx > -1) it.getString(idx) else null
             } else null
         }
+    }
+
+    private fun diagnoseHttpFailure(
+        url: String,
+        code: Int,
+        headers: okhttp3.Headers,
+        bodyString: String
+    ): String {
+        val logs = StringBuilder()
+        logs.append("[Network Layer Diagnosis] HTTP $code on connection to: $url\n")
+        
+        // 1. Identify Server & Security/CDN layers
+        val server = headers["Server"] ?: headers["server"]
+        val cfRay = headers["CF-RAY"] ?: headers["cf-ray"]
+        val cfCountry = headers["CF-IPCountry"] ?: headers["cf-ipcountry"]
+        
+        if (server != null) {
+            logs.append(" - Gateway Server: $server\n")
+        }
+        if (!cfRay.isNullOrEmpty()) {
+            logs.append(" - CDN Provider: Cloudflare (Ray ID: $cfRay)\n")
+        }
+        if (!cfCountry.isNullOrEmpty()) {
+            logs.append(" - Client Geolocated Region: $cfCountry\n")
+        }
+        
+        // 2. Identify Rate-Limiting or Abuse Prevention
+        val rateLimitLimit = headers["X-RateLimit-Limit"] ?: headers["x-ratelimit-limit"] ?: headers["ratelimit-limit"]
+        val rateLimitRemaining = headers["X-RateLimit-Remaining"] ?: headers["x-ratelimit-remaining"] ?: headers["ratelimit-remaining"]
+        val retryAfter = headers["Retry-After"] ?: headers["retry-after"]
+        
+        if (rateLimitLimit != null || rateLimitRemaining != null) {
+            logs.append(" - Rate Limits: Limit=$rateLimitLimit, Remaining=$rateLimitRemaining\n")
+        }
+        if (retryAfter != null) {
+            logs.append(" - Rate Limit Backoff: Retry-After=$retryAfter seconds requested\n")
+        }
+        
+        // 3. Diagnose 403 Forbidden specifically
+        if (code == 403) {
+            logs.append(" - 403 Forbidden Analysis:\n")
+            val isCloudflareBlock = (server?.contains("cloudflare", ignoreCase = true) == true) || 
+                                    bodyString.contains("cloudflare", ignoreCase = true) || 
+                                    bodyString.contains("Direct IP access not allowed", ignoreCase = true)
+            val isWafBlock = bodyString.contains("Access denied", ignoreCase = true) || 
+                             bodyString.contains("security rules", ignoreCase = true) ||
+                             bodyString.contains("captcha", ignoreCase = true) ||
+                             bodyString.contains("challenge", ignoreCase = true)
+            
+            when {
+                isCloudflareBlock && isWafBlock -> {
+                    logs.append("   ⚠️ ROOT CAUSE: Cloudflare Web Application Firewall (WAF) challenge/block detected. The server's CDN rejected our client request pattern (browser fingerprint/JA3 mismatch or IP blacklist).\n")
+                }
+                isCloudflareBlock -> {
+                    logs.append("   ⚠️ ROOT CAUSE: Cloudflare CDN block detected. Direct programmatic access was blocked. Requires proper Origin/Referer headers or dynamic IP rotation.\n")
+                }
+                isWafBlock -> {
+                    logs.append("   ⚠️ ROOT CAUSE: Security firewall rules or anti-bot challenge (captcha/turnstile) encountered. The target host's edge security flagged our requests.\n")
+                }
+                else -> {
+                    logs.append("   ⚠️ ROOT CAUSE: API key restriction, missing domain authorization, or IP region ban. The server refused to authorize the client.\n")
+                }
+            }
+        }
+        
+        // 4. Diagnose 400 Bad Request specifically
+        if (code == 400) {
+            logs.append(" - 400 Bad Request Analysis:\n")
+            val isHeaderIssue = bodyString.contains("header", ignoreCase = true) || 
+                                bodyString.contains("user-agent", ignoreCase = true) || 
+                                bodyString.contains("cookie", ignoreCase = true)
+            val isParamsIssue = bodyString.contains("missing", ignoreCase = true) || 
+                                bodyString.contains("invalid", ignoreCase = true) || 
+                                bodyString.contains("parameter", ignoreCase = true) ||
+                                bodyString.contains("format", ignoreCase = true)
+            
+            when {
+                isHeaderIssue -> {
+                    logs.append("   ⚠️ ROOT CAUSE: Host rejected client headers, cookies, or session agent attributes. The session is likely invalid or browser spoofing was detected.\n")
+                }
+                isParamsIssue -> {
+                    logs.append("   ⚠️ ROOT CAUSE: API payload configuration error. The requested resource URL format is not supported or required JSON fields are incorrect.\n")
+                }
+                else -> {
+                    logs.append("   ⚠️ ROOT CAUSE: Malformed input request or unsupported video service endpoint for this particular instance.\n")
+                }
+            }
+        }
+
+        // 5. Inspect Content Type & HTML response payload
+        val contentType = headers["Content-Type"] ?: headers["content-type"] ?: ""
+        logs.append(" - Content-Type: $contentType\n")
+        if (contentType.contains("text/html") || bodyString.trim().startsWith("<")) {
+            val titleMatch = Regex("<title>([^<]+)</title>", RegexOption.IGNORE_CASE).find(bodyString)
+            if (titleMatch != null) {
+                logs.append(" - Document HTML Title: '${titleMatch.groupValues[1].trim()}'\n")
+            } else {
+                val preview = bodyString.take(150).replace("\n", " ").trim()
+                logs.append(" - HTML Body Preview: '$preview...'\n")
+            }
+        } else if (bodyString.isNotEmpty()) {
+            val preview = if (bodyString.length > 250) bodyString.take(250) + "..." else bodyString
+            logs.append(" - Response Body: $preview\n")
+        } else {
+            logs.append(" - Response Body is empty.\n")
+        }
+
+        return logs.toString()
     }
 }

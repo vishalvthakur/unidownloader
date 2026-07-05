@@ -47,6 +47,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString("cobalt_engine_url", url).apply()
     }
 
+    // User-Agent and Session Cookie settings state flows
+    val userAgentPreset = MutableStateFlow(prefs.getString("user_agent_preset", "default") ?: "default")
+    val customUserAgent = MutableStateFlow(prefs.getString("custom_user_agent", "") ?: "")
+    val customCookies = MutableStateFlow(prefs.getString("custom_cookies", "") ?: "")
+
+    fun setUserAgentPreset(preset: String) {
+        userAgentPreset.value = preset
+        prefs.edit().putString("user_agent_preset", preset).apply()
+    }
+
+    fun setCustomUserAgent(ua: String) {
+        customUserAgent.value = ua
+        prefs.edit().putString("custom_user_agent", ua).apply()
+    }
+
+    fun setCustomCookies(cookies: String) {
+        customCookies.value = cookies
+        prefs.edit().putString("custom_cookies", cookies).apply()
+    }
+
     // Manual Download state
     sealed class DownloadState {
         object Idle : DownloadState()
@@ -56,6 +76,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     val manualDownloadState: StateFlow<DownloadState> = DownloadService.serviceDownloadState
+
+    // Live diagnostics logs of last download
+    val lastDownloadLogs: StateFlow<List<String>> = MediaDownloader.lastDownloadLogs
+
+    // Server health and latency monitor
+    private val _serverLatencies = MutableStateFlow<Map<String, String>>(emptyMap())
+    val serverLatencies: StateFlow<Map<String, String>> = _serverLatencies.asStateFlow()
+
+    fun testServerLatencies() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val servers = listOf(
+                "https://dog.kittycat.boo/",
+                "https://api.cobalt.liubquanti.click/",
+                "https://rue-cobalt.xenon.zone/",
+                "https://cobaltapi.cjs.nz/",
+                "https://api.cobalt.tools/"
+            )
+            val current = _serverLatencies.value.toMutableMap()
+            servers.forEach { current[it] = "Testing..." }
+            _serverLatencies.value = current
+
+            servers.forEach { serverUrl ->
+                viewModelScope.launch(Dispatchers.IO) {
+                    val start = System.currentTimeMillis()
+                    val status = try {
+                        val client = okhttp3.OkHttpClient.Builder()
+                            .connectTimeout(3000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                            .readTimeout(3000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                            .build()
+                        val req = okhttp3.Request.Builder()
+                            .url(serverUrl)
+                            .get()
+                            .header("Accept", "application/json")
+                            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                            .build()
+                        client.newCall(req).execute().use { res ->
+                            if (res.isSuccessful || res.code in listOf(405, 400, 401, 403)) {
+                                val delay = System.currentTimeMillis() - start
+                                "${delay}ms"
+                            } else {
+                                "HTTP ${res.code}"
+                            }
+                        }
+                    } catch (e: Exception) {
+                        "Offline"
+                    }
+                    val updated = _serverLatencies.value.toMutableMap()
+                    updated[serverUrl] = status
+                    _serverLatencies.value = updated
+                }
+            }
+        }
+    }
 
     // Smart File Manager download history list
     val allDownloads: StateFlow<List<DownloadEntity>> = repository.allDownloads
