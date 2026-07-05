@@ -502,7 +502,7 @@ fun DownloaderTab(viewModel: MainViewModel) {
                             "Official Server" to "https://api.cobalt.tools/",
                             "Ryb.me Community" to "https://cobalt.api.ryb.me/",
                             "Chunky Club" to "https://cobalt.chunky.club/",
-                            "Kuss Pub" to "https://cobalt-api.kuss.pub/",
+                            "SmartMinds JP" to "https://cobalt.smartminds.jp/",
                             "Cobalt.sh" to "https://api.cobalt.sh/"
                         )
                         

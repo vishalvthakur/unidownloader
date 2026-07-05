@@ -23,9 +23,16 @@ import java.util.concurrent.TimeUnit
 
 object MediaDownloader {
     private const val TAG = "MediaDownloader"
-    private val client = OkHttpClient.Builder()
+    
+    private val apiClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .build()
+
+    private val downloadClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
@@ -41,14 +48,15 @@ object MediaDownloader {
             "https://cobalt.api.ryb.me/",
             "https://cobalt.chunky.club/",
             "https://api.cobalt.sh/",
-            "https://cobalt-api.kuss.pub/"
+            "https://cobalt.smartminds.jp/"
         )
         try {
             val request = Request.Builder()
                 .url("https://cobalt.directory/api/instances")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .get()
                 .build()
-            client.newCall(request).execute().use { response ->
+            apiClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val body = response.body?.string()
                     if (!body.isNullOrEmpty()) {
@@ -58,8 +66,8 @@ object MediaDownloader {
                             val obj = jsonArray.getJSONObject(i)
                             val url = obj.optString("url", "")
                             val isUp = obj.optBoolean("up", true)
-                            // Clean slash
-                            if (url.isNotEmpty() && isUp) {
+                            // Clean slash and verify HTTPS protocol
+                            if (url.isNotEmpty() && isUp && url.startsWith("https://", ignoreCase = true)) {
                                 val cleanUrl = if (url.endsWith("/")) url else "$url/"
                                 list.add(cleanUrl)
                             }
@@ -157,9 +165,12 @@ object MediaDownloader {
                 .post(jsonBody.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("Origin", "https://cobalt.tools")
+                .header("Referer", "https://cobalt.tools/")
                 .build()
 
-            client.newCall(request).execute().use { response ->
+            apiClient.newCall(request).execute().use { response ->
                 val responseBodyStr = response.body?.string() ?: ""
                 
                 if (!response.isSuccessful) {
@@ -232,8 +243,11 @@ object MediaDownloader {
     ): DownloadResult = withContext(Dispatchers.IO) {
         try {
             Log.d(TAG, "Downloading direct stream URL: $fileUrl")
-            val request = Request.Builder().url(fileUrl).build()
-            client.newCall(request).execute().use { response ->
+            val request = Request.Builder()
+                .url(fileUrl)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .build()
+            downloadClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext DownloadResult.Error("Failed to fetch stream content: ${response.code}")
                 }
