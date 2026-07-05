@@ -1,0 +1,6 @@
+{
+  "name": "UniDownloader",
+  "description": "An all-in-one media downloader with an invisible background share-to-download system, a WhatsApp status saver, and a smart file manager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
