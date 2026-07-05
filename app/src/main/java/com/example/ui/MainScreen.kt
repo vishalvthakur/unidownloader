@@ -499,11 +499,11 @@ fun DownloaderTab(viewModel: MainViewModel) {
                         
                         val standardInstances = listOf(
                             "Auto-Fallback (Recommended)" to "auto",
-                            "Official Server" to "https://api.cobalt.tools/",
-                            "Ryb.me Community" to "https://cobalt.api.ryb.me/",
-                            "Chunky Club" to "https://cobalt.chunky.club/",
-                            "SmartMinds JP" to "https://cobalt.smartminds.jp/",
-                            "Cobalt.sh" to "https://api.cobalt.sh/"
+                            "Kittycat Boo (Tested)" to "https://dog.kittycat.boo/",
+                            "Liubquanti Click (Tested)" to "https://api.cobalt.liubquanti.click/",
+                            "Rue Xenon Zone (Tested)" to "https://rue-cobalt.xenon.zone/",
+                            "CJS NZ (Tested)" to "https://cobaltapi.cjs.nz/",
+                            "Official Server (JWT Required)" to "https://api.cobalt.tools/"
                         )
                         
                         standardInstances.forEach { (name, value) ->

@@ -43,8 +43,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         data class Error(val message: String) : DownloadState()
     }
 
-    private val _manualDownloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
-    val manualDownloadState: StateFlow<DownloadState> = _manualDownloadState.asStateFlow()
+    val manualDownloadState: StateFlow<DownloadState> = DownloadService.serviceDownloadState
 
     // Smart File Manager download history list
     val allDownloads: StateFlow<List<DownloadEntity>> = repository.allDownloads
@@ -100,33 +99,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startManualDownload(url: String) {
         if (url.isEmpty()) {
-            _manualDownloadState.value = DownloadState.Error("Please enter a valid URL")
+            DownloadService.updateServiceDownloadState(DownloadState.Error("Please enter a valid URL"))
             return
         }
-        _manualDownloadState.value = DownloadState.Downloading(0)
-        viewModelScope.launch {
-            val result = MediaDownloader.downloadMedia(
-                context = context,
-                url = url,
-                repository = repository,
-                preferredEngineUrl = cobaltEngineUrl.value,
-                onProgress = { progress ->
-                    _manualDownloadState.value = DownloadState.Downloading(progress)
-                }
-            )
-            when (result) {
-                is MediaDownloader.DownloadResult.Success -> {
-                    _manualDownloadState.value = DownloadState.Success(result.fileName)
-                }
-                is MediaDownloader.DownloadResult.Error -> {
-                    _manualDownloadState.value = DownloadState.Error(result.message)
-                }
-            }
-        }
+        DownloadService.startDownload(context, url)
     }
 
     fun resetDownloadState() {
-        _manualDownloadState.value = DownloadState.Idle
+        DownloadService.resetState()
     }
 
     // WhatsApp Status Management

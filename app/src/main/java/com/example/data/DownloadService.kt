@@ -8,6 +8,10 @@ import android.os.IBinder
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import com.example.ui.MainViewModel.DownloadState
 
 class DownloadService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -18,6 +22,18 @@ class DownloadService : Service() {
         private const val NOTIFICATION_ID = 1001
         const val ACTION_START_DOWNLOAD = "ACTION_START_DOWNLOAD"
         const val EXTRA_URL = "EXTRA_URL"
+
+        // Global flow of current download state from the Service
+        private val _serviceDownloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
+        val serviceDownloadState: StateFlow<DownloadState> = _serviceDownloadState.asStateFlow()
+
+        fun updateServiceDownloadState(state: DownloadState) {
+            _serviceDownloadState.value = state
+        }
+
+        fun resetState() {
+            _serviceDownloadState.value = DownloadState.Idle
+        }
 
         fun startDownload(context: Context, url: String) {
             val intent = Intent(context, DownloadService::class.java).apply {
@@ -43,7 +59,8 @@ class DownloadService : Service() {
         if (intent?.action == ACTION_START_DOWNLOAD) {
             val url = intent.getStringExtra(EXTRA_URL)
             if (!url.isNullOrEmpty()) {
-                startForeground(NOTIFICATION_ID, buildProgressNotification(0))
+                _serviceDownloadState.value = DownloadState.Downloading(0)
+                startForeground(NOTIFICATION_ID, buildProgressNotification(0, 0L, 0L))
                 performDownload(url)
             } else {
                 stopSelf()
@@ -66,8 +83,9 @@ class DownloadService : Service() {
                 url = url,
                 repository = repository,
                 preferredEngineUrl = preferredEngineUrl,
-                onProgress = { progress ->
-                    updateNotification(progress)
+                onProgress = { progress, bytesRead, totalBytes ->
+                    updateNotification(progress, bytesRead, totalBytes)
+                    _serviceDownloadState.value = DownloadState.Downloading(progress)
                 }
             )
 
@@ -80,6 +98,7 @@ class DownloadService : Service() {
                             Toast.LENGTH_LONG
                         ).show()
                         showCompleteNotification(result.fileName, true)
+                        _serviceDownloadState.value = DownloadState.Success(result.fileName)
                     }
                     is MediaDownloader.DownloadResult.Error -> {
                         Toast.makeText(
@@ -88,6 +107,7 @@ class DownloadService : Service() {
                             Toast.LENGTH_LONG
                         ).show()
                         showCompleteNotification(result.message, false)
+                        _serviceDownloadState.value = DownloadState.Error(result.message)
                     }
                 }
                 stopSelf()
@@ -109,20 +129,40 @@ class DownloadService : Service() {
         }
     }
 
-    private fun buildProgressNotification(progress: Int): Notification {
+    private fun buildProgressNotification(progress: Int, bytesRead: Long, totalBytes: Long): Notification {
+        val contentText = when {
+            totalBytes > 0 -> {
+                val percentageStr = if (progress >= 0) "$progress%" else "Downloading..."
+                "Downloading media: $percentageStr (${formatBytes(bytesRead)} / ${formatBytes(totalBytes)})"
+            }
+            bytesRead > 0 -> {
+                "Downloading media: ${formatBytes(bytesRead)} completed"
+            }
+            else -> {
+                "Starting download..."
+            }
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Universal Downloader")
-            .setContentText("Downloading media in original quality... $progress%")
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setProgress(100, progress, false)
+            .setProgress(100, if (progress >= 0) progress else 0, progress < 0)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 
-    private fun updateNotification(progress: Int) {
+    private fun updateNotification(progress: Int, bytesRead: Long, totalBytes: Long) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, buildProgressNotification(progress))
+        manager.notify(NOTIFICATION_ID, buildProgressNotification(progress, bytesRead, totalBytes))
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes <= 0) return "0 B"
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
+        return java.text.DecimalFormat("#,##0.#").format(bytes / Math.pow(1024.0, digitGroups.toDouble())) + " " + units[digitGroups]
     }
 
     private fun showCompleteNotification(message: String, success: Boolean) {

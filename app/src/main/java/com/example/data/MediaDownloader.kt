@@ -44,40 +44,83 @@ object MediaDownloader {
 
     private suspend fun fetchActiveInstances(): List<String> = withContext(Dispatchers.IO) {
         val defaultInstances = listOf(
-            "https://api.cobalt.tools/",
-            "https://cobalt.api.ryb.me/",
-            "https://cobalt.chunky.club/",
-            "https://api.cobalt.sh/",
-            "https://cobalt.smartminds.jp/"
+            "https://dog.kittycat.boo/",
+            "https://api.cobalt.liubquanti.click/",
+            "https://rue-cobalt.xenon.zone/",
+            "https://cobaltapi.cjs.nz/"
         )
         try {
             val request = Request.Builder()
-                .url("https://cobalt.directory/api/instances")
+                .url("https://cobalt.directory/")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .get()
                 .build()
             apiClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    val body = response.body?.string()
-                    if (!body.isNullOrEmpty()) {
-                        val jsonArray = org.json.JSONArray(body)
+                    val html = response.body?.string()
+                    if (!html.isNullOrEmpty()) {
+                        // Regex to match "api":"something.domain.ext" or api:"something.domain.ext"
+                        val regex = """(?:api["']?\s*:\s*["'])([a-zA-Z0-9.-]+)(?:["'])""".toRegex()
+                        val matches = regex.findAll(html)
                         val list = mutableListOf<String>()
-                        for (i in 0 until jsonArray.length()) {
-                            val obj = jsonArray.getJSONObject(i)
-                            val url = obj.optString("url", "")
-                            val isUp = obj.optBoolean("up", true)
-                            // Clean slash and verify HTTPS protocol
-                            if (url.isNotEmpty() && isUp && url.startsWith("https://", ignoreCase = true)) {
-                                val cleanUrl = if (url.endsWith("/")) url else "$url/"
-                                list.add(cleanUrl)
+                        
+                        // Extract unique matching domains
+                        val uniqueHosts = matches.map { it.groupValues[1] }
+                            .distinct()
+                            .filter { host ->
+                                if (host.isEmpty() || !host.contains(".")) return@filter false
+                                if (host.contains("cloudflare", ignoreCase = true) ||
+                                    host.contains("plausible", ignoreCase = true) ||
+                                    host.contains("google", ignoreCase = true) ||
+                                    host.contains("br0k3.me", ignoreCase = true)) { // often offline
+                                    return@filter false
+                                }
+                                
+                                // Check if this host is explicitly offline in the HTML context
+                                val hostIndex = html.indexOf(host)
+                                if (hostIndex != -1) {
+                                    val start = (hostIndex - 150).coerceAtLeast(0)
+                                    val end = (hostIndex + 150).coerceAtMost(html.length)
+                                    val contextText = html.substring(start, end)
+                                    if (contextText.contains("online:false") || 
+                                        contextText.contains("\"online\":false") || 
+                                        contextText.contains("\"online\": false") ||
+                                        contextText.contains("online: false")) {
+                                        Log.d(TAG, "Skipping offline host from cobalt.directory: $host")
+                                        return@filter false
+                                    }
+                                }
+                                true
+                            }
+                            .toList()
+
+                        for (host in uniqueHosts) {
+                            val url = "https://$host/"
+                            if (!list.contains(url)) {
+                                list.add(url)
                             }
                         }
-                        if (list.isNotEmpty()) return@withContext list
+                        
+                        if (list.isNotEmpty()) {
+                            Log.d(TAG, "Successfully extracted ${list.size} dynamic instances from cobalt.directory: $list")
+                            // Prioritize our known tested working endpoints at the very front of the list,
+                            // but append the others so we have massive fallbacks!
+                            val combined = mutableListOf<String>()
+                            for (def in defaultInstances) {
+                                combined.add(def)
+                            }
+                            for (item in list) {
+                                if (!combined.contains(item)) {
+                                    combined.add(item)
+                                }
+                            }
+                            return@withContext combined
+                        }
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to fetch dynamic instances from cobalt.directory, using defaults", e)
+            Log.e(TAG, "Failed to dynamically scrape cobalt.directory homepage, falling back to defaults", e)
         }
         return@withContext defaultInstances
     }
@@ -90,7 +133,7 @@ object MediaDownloader {
         url: String,
         repository: DownloadRepository,
         preferredEngineUrl: String = "auto",
-        onProgress: (Int) -> Unit = {}
+        onProgress: (progress: Int, bytesRead: Long, totalBytes: Long) -> Unit = { _, _, _ -> }
     ): DownloadResult = withContext(Dispatchers.IO) {
         // Resolve list of base instances to try
         val instances = mutableListOf<String>()
@@ -139,7 +182,7 @@ object MediaDownloader {
         url: String,
         repository: DownloadRepository,
         payloadAttempt: Int,
-        onProgress: (Int) -> Unit
+        onProgress: (progress: Int, bytesRead: Long, totalBytes: Long) -> Unit
     ): DownloadResult = withContext(Dispatchers.IO) {
         try {
             val jsonBody = org.json.JSONObject().apply {
@@ -239,7 +282,7 @@ object MediaDownloader {
         suggestedFilename: String,
         originalUrl: String,
         repository: DownloadRepository,
-        onProgress: (Int) -> Unit
+        onProgress: (progress: Int, bytesRead: Long, totalBytes: Long) -> Unit
     ): DownloadResult = withContext(Dispatchers.IO) {
         try {
             Log.d(TAG, "Downloading direct stream URL: $fileUrl")
@@ -316,7 +359,7 @@ object MediaDownloader {
         filename: String,
         mediaCategory: String,
         totalBytes: Long,
-        onProgress: (Int) -> Unit
+        onProgress: (progress: Int, bytesRead: Long, totalBytes: Long) -> Unit
     ): Uri? {
         val resolver = context.contentResolver
         val contentValues = ContentValues().apply {
@@ -362,15 +405,33 @@ object MediaDownloader {
                 val buffer = ByteArray(8 * 1024)
                 var bytesRead: Int
                 var totalBytesRead = 0L
+                var lastProgress = -1
+                var lastBytesUpdated = 0L
 
                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                     outputStream.write(buffer, 0, bytesRead)
                     totalBytesRead += bytesRead
+                    val progress = if (totalBytes > 0) {
+                        ((totalBytesRead * 100) / totalBytes).toInt()
+                    } else {
+                        -1
+                    }
                     if (totalBytes > 0) {
-                        val progress = ((totalBytesRead * 100) / totalBytes).toInt()
-                        onProgress(progress)
+                        if (progress != lastProgress) {
+                            lastProgress = progress
+                            onProgress(progress, totalBytesRead, totalBytes)
+                        }
+                    } else {
+                        // Update every 512 KB when content length is unknown
+                        if (totalBytesRead - lastBytesUpdated >= 512 * 1024) {
+                            lastBytesUpdated = totalBytesRead
+                            onProgress(-1, totalBytesRead, totalBytes)
+                        }
                     }
                 }
+                // Send final progress update
+                val finalProgress = if (totalBytes > 0) 100 else -1
+                onProgress(finalProgress, totalBytesRead, totalBytes)
                 outputStream.flush()
             }
 
