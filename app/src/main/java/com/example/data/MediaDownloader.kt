@@ -50,7 +50,24 @@ object MediaDownloader {
         data class Error(val message: String) : DownloadResult()
     }
 
-    private suspend fun fetchActiveInstances(): List<String> = withContext(Dispatchers.IO) {
+    private fun deduceService(url: String): String? {
+        val lowerUrl = url.lowercase()
+        return when {
+            lowerUrl.contains("youtube.com") || lowerUrl.contains("youtu.be") -> "youtube"
+            lowerUrl.contains("instagram.com") -> "instagram"
+            lowerUrl.contains("tiktok.com") -> "tiktok"
+            lowerUrl.contains("twitter.com") || lowerUrl.contains("x.com") -> "twitter"
+            lowerUrl.contains("reddit.com") -> "reddit"
+            lowerUrl.contains("bilibili.com") -> "bilibili"
+            lowerUrl.contains("soundcloud.com") -> "soundcloud"
+            lowerUrl.contains("twitch.tv") -> "twitch"
+            lowerUrl.contains("pinterest.com") -> "pinterest"
+            lowerUrl.contains("facebook.com") || lowerUrl.contains("fb.watch") -> "facebook"
+            else -> null
+        }
+    }
+
+    private suspend fun fetchActiveInstances(targetService: String? = null): List<String> = withContext(Dispatchers.IO) {
         val defaultInstances = listOf(
             "https://dog.kittycat.boo/",
             "https://api.cobalt.liubquanti.click/",
@@ -70,10 +87,9 @@ object MediaDownloader {
                         // Regex to match "api":"something.domain.ext" or api:"something.domain.ext"
                         val regex = """(?:api["']?\s*:\s*["'])([a-zA-Z0-9.-]+)(?:["'])""".toRegex()
                         val matches = regex.findAll(html)
-                        val list = mutableListOf<String>()
                         
                         // Extract unique matching domains
-                        val uniqueHosts = matches.map { it.groupValues[1] }
+                        val scrapedHosts = matches.map { it.groupValues[1] }
                             .distinct()
                             .filter { host ->
                                 if (host.isEmpty() || !host.contains(".")) return@filter false
@@ -113,6 +129,18 @@ object MediaDownloader {
                             }
                             .toList()
 
+                        // Combine default instances and scraped hosts to run capability checks on everything!
+                        val hostSet = scrapedHosts.toMutableSet()
+                        for (def in defaultInstances) {
+                            try {
+                                val host = Uri.parse(def).host
+                                if (host != null) {
+                                    hostSet.add(host)
+                                }
+                            } catch (_: Exception) {}
+                        }
+                        val uniqueHosts = hostSet.toList()
+
                         val verifiedActiveList = coroutineScope {
                             uniqueHosts.map { host ->
                                 async {
@@ -120,14 +148,33 @@ object MediaDownloader {
                                     try {
                                         val req = Request.Builder()
                                             .url(url)
-                                            .head()
+                                            .get()
+                                            .header("Accept", "application/json")
                                             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                                             .build()
-                                        healthCheckClient.newCall(req).execute().use { response ->
-                                            if (response.isSuccessful || response.code in listOf(405, 400, 401, 403)) {
-                                                url
+                                        healthCheckClient.newCall(req).execute().use { res ->
+                                            if (res.isSuccessful) {
+                                                val bodyStr = res.body?.string() ?: ""
+                                                var supportedServices = listOf<String>()
+                                                try {
+                                                    val json = org.json.JSONObject(bodyStr)
+                                                    val cobaltObj = json.optJSONObject("cobalt")
+                                                    if (cobaltObj != null) {
+                                                        val servicesArray = cobaltObj.optJSONArray("services")
+                                                        if (servicesArray != null) {
+                                                            val servicesList = mutableListOf<String>()
+                                                            for (i in 0 until servicesArray.length()) {
+                                                                servicesList.add(servicesArray.getString(i).lowercase())
+                                                            }
+                                                            supportedServices = servicesList
+                                                        }
+                                                    }
+                                                } catch (_: Exception) {}
+                                                Pair(url, supportedServices)
+                                            } else if (res.code in listOf(405, 400, 401, 403)) {
+                                                Pair(url, listOf<String>())
                                             } else {
-                                                Log.d(TAG, "Health check failed for $url: HTTP ${response.code}")
+                                                Log.d(TAG, "Health check failed for $url: HTTP ${res.code}")
                                                 null
                                             }
                                         }
@@ -140,25 +187,43 @@ object MediaDownloader {
                         }
 
                         if (verifiedActiveList.isNotEmpty()) {
-                            Log.d(TAG, "Successfully extracted and verified ${verifiedActiveList.size} dynamic instances from cobalt.directory: $verifiedActiveList")
-                            // Prioritize our known tested working endpoints at the very front of the list,
-                            // but append the others so we have massive fallbacks!
-                            val combined = mutableListOf<String>()
-                            for (def in defaultInstances) {
-                                combined.add(def)
-                            }
-                            for (item in verifiedActiveList) {
-                                if (!combined.contains(item)) {
-                                    combined.add(item)
+                            // Sort instances:
+                            // 1. Online hosts that explicitly support targetService (at the top)
+                            // 2. Online hosts where support is unknown (in the middle)
+                            // 3. Online hosts that explicitly do NOT support targetService (at the bottom)
+                            val sortedList = if (targetService != null) {
+                                val lowerService = targetService.lowercase()
+                                val supporting = mutableListOf<String>()
+                                val unknown = mutableListOf<String>()
+                                val nonSupporting = mutableListOf<String>()
+                                
+                                for (pair in verifiedActiveList) {
+                                    val u = pair.first
+                                    val services = pair.second
+                                    when {
+                                        services.isEmpty() -> unknown.add(u)
+                                        services.contains(lowerService) -> supporting.add(u)
+                                        else -> nonSupporting.add(u)
+                                    }
                                 }
+                                
+                                val combinedSorted = mutableListOf<String>()
+                                combinedSorted.addAll(supporting)
+                                combinedSorted.addAll(unknown)
+                                combinedSorted.addAll(nonSupporting)
+                                combinedSorted
+                            } else {
+                                verifiedActiveList.map { it.first }
                             }
-                            return@withContext combined
+
+                            Log.d(TAG, "Sorted active instances for target service '$targetService': $sortedList")
+                            return@withContext sortedList
                         }
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to dynamically scrape cobalt.directory homepage, falling back to defaults", e)
+            Log.e(TAG, "Failed to dynamically scrape/check cobalt instances, falling back to defaults", e)
         }
         return@withContext defaultInstances
     }
@@ -173,6 +238,13 @@ object MediaDownloader {
         preferredEngineUrl: String = "auto",
         onProgress: (progress: Int, bytesRead: Long, totalBytes: Long) -> Unit = { _, _, _ -> }
     ): DownloadResult = withContext(Dispatchers.IO) {
+        val trimmedUrl = url.trim()
+        if (trimmedUrl.isEmpty()) {
+            return@withContext DownloadResult.Error("URL is empty")
+        }
+
+        val targetService = deduceService(trimmedUrl)
+
         // Resolve list of base instances to try
         val instances = mutableListOf<String>()
         if (preferredEngineUrl != "auto" && preferredEngineUrl.isNotEmpty()) {
@@ -180,8 +252,8 @@ object MediaDownloader {
             instances.add(cleanPref)
         }
         
-        // Add dynamic/default fallback instances to the pool
-        val fetched = fetchActiveInstances()
+        // Add dynamic/default fallback instances to the pool sorted by capability
+        val fetched = fetchActiveInstances(targetService)
         for (f in fetched) {
             if (!instances.contains(f)) {
                 instances.add(f)
@@ -195,7 +267,7 @@ object MediaDownloader {
             
             // Try different payload formats for the current instance (from strict to compatible)
             for (payloadAttempt in 0..2) {
-                val result = makeSingleRequest(context, baseUrl, url, repository, payloadAttempt, onProgress)
+                val result = makeSingleRequest(context, baseUrl, trimmedUrl, repository, payloadAttempt, onProgress)
                 when (result) {
                     is DownloadResult.Success -> {
                         return@withContext result
@@ -205,6 +277,19 @@ object MediaDownloader {
                         if (!isInfra || lastError.isEmpty() || isInfrastructureError(lastError) || lastError.contains("No working Cobalt server")) {
                             lastError = result.message
                         }
+
+                        // Check if the error is a permanent service restriction on this server
+                        val lowerMsg = result.message.lowercase()
+                        val isPermanentServiceError = lowerMsg.contains("unsupported") || 
+                                                     lowerMsg.contains("disabled") || 
+                                                     lowerMsg.contains("blocked") ||
+                                                     lowerMsg.contains("error.api.service.disabled")
+
+                        if (isPermanentServiceError) {
+                            // Immediately break out and try next server instead of wasting time with other payload attempts here
+                            break
+                        }
+
                         // If the error is NOT a 400 bad request, don't waste time with other payload attempts on this server; try next server
                         if (!result.message.contains("HTTP 400") && !result.message.contains("Server error: HTTP 400")) {
                             break
@@ -243,16 +328,17 @@ object MediaDownloader {
                 put("url", url)
                 when (payloadAttempt) {
                     0 -> {
-                        // Classic v7 standard
-                        put("videoQuality", "max")
+                        // Standard highly compatible Cobalt payload (matching default docs)
+                        put("videoQuality", "1080")
                         put("downloadMode", "auto")
                     }
                     1 -> {
-                        // Modern v10 standard
-                        put("vQuality", "max")
+                        // Max quality Cobalt payload
+                        put("videoQuality", "max")
+                        put("downloadMode", "auto")
                     }
                     2 -> {
-                        // Absolute minimal parameters (max compatibility)
+                        // Minimalist payload: Only URL (maximum fallback compatibility)
                     }
                 }
             }

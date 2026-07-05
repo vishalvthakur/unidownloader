@@ -20,4 +20,8 @@ class DownloadRepository(private val downloadDao: DownloadDao) {
     suspend fun getDownloadById(id: Int): DownloadEntity? {
         return downloadDao.getDownloadById(id)
     }
+
+    suspend fun getDownloadsByPlatform(platform: String): List<DownloadEntity> {
+        return downloadDao.getDownloadsByPlatform(platform)
+    }
 }

@@ -5,6 +5,8 @@ import android.content.Context
 import android.net.Uri
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.*
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +15,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+    class Factory(private val application: Application) : ViewModelProvider.Factory {
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
+                @Suppress("UNCHECKED_CAST")
+                return MainViewModel(application) as T
+            }
+            throw IllegalArgumentException("Unknown ViewModel class")
+        }
+    }
+
     private val context = application.applicationContext
     private val repository: DownloadRepository
 
@@ -83,8 +95,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _loadingStatuses = MutableStateFlow(false)
     val loadingStatuses: StateFlow<Boolean> = _loadingStatuses.asStateFlow()
 
+    private val _detectedFolders = MutableStateFlow<List<String>>(emptyList())
+    val detectedFolders: StateFlow<List<String>> = _detectedFolders.asStateFlow()
+
+    private val _selectedStatusUris = MutableStateFlow<Set<Uri>>(emptySet())
+    val selectedStatusUris: StateFlow<Set<Uri>> = _selectedStatusUris.asStateFlow()
+
+    private val _isSelectionMode = MutableStateFlow(false)
+    val isSelectionMode: StateFlow<Boolean> = _isSelectionMode.asStateFlow()
+
     init {
-        // Load stored Uri if exists
+        // Scan for detected folders in the background
+        viewModelScope.launch(Dispatchers.IO) {
+            _detectedFolders.value = WhatsAppStatusHelper.getDetectedWhatsAppFolders()
+        }
+
+        // Load stored Uri if exists, otherwise attempt local file scan
         val savedUriStr = prefs.getString("whatsapp_saf_uri", null)
         if (!savedUriStr.isNullOrEmpty()) {
             try {
@@ -93,7 +119,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 loadWhatsAppStatuses(uri)
             } catch (e: Exception) {
                 e.printStackTrace()
+                loadWhatsAppStatuses(null)
             }
+        } else {
+            loadWhatsAppStatuses(null)
         }
     }
 
@@ -116,11 +145,85 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadWhatsAppStatuses(uri)
     }
 
-    fun loadWhatsAppStatuses(uri: Uri? = whatsappTreeUri.value) {
-        if (uri == null) return
-        _loadingStatuses.value = true
+    fun clearWhatsAppTreeUri() {
+        whatsappTreeUri.value = null
+        prefs.edit().remove("whatsapp_saf_uri").apply()
+        loadWhatsAppStatuses(null)
+    }
+
+    fun toggleStatusSelection(status: StatusMedia) {
+        val current = _selectedStatusUris.value.toMutableSet()
+        if (current.contains(status.uri)) {
+            current.remove(status.uri)
+        } else {
+            current.add(status.uri)
+        }
+        _selectedStatusUris.value = current
+        if (current.isEmpty()) {
+            _isSelectionMode.value = false
+        } else {
+            _isSelectionMode.value = true
+        }
+    }
+
+    fun selectAllStatuses() {
+        val allUris = _whatsappStatuses.value.map { it.uri }.toSet()
+        _selectedStatusUris.value = allUris
+        if (allUris.isNotEmpty()) {
+            _isSelectionMode.value = true
+        }
+    }
+
+    fun clearSelection() {
+        _selectedStatusUris.value = emptySet()
+        _isSelectionMode.value = false
+    }
+
+    fun toggleSelectionMode() {
+        val wasInSelectionMode = _isSelectionMode.value
+        if (wasInSelectionMode) {
+            clearSelection()
+        } else {
+            _isSelectionMode.value = true
+        }
+    }
+
+    fun saveSelectedStatuses() {
+        val selectedUris = _selectedStatusUris.value
+        if (selectedUris.isEmpty()) return
+
+        val statusesToSave = _whatsappStatuses.value.filter { selectedUris.contains(it.uri) }
         viewModelScope.launch(Dispatchers.IO) {
-            val list = WhatsAppStatusHelper.getStatusesFromTree(context, uri)
+            var successCount = 0
+            for (status in statusesToSave) {
+                val success = WhatsAppStatusHelper.saveStatusToGallery(context, status)
+                if (success) {
+                    successCount++
+                    saveWhatsAppDownloadToHistory(status)
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (successCount == statusesToSave.size) {
+                    Toast.makeText(context, "Saved $successCount statuses to Gallery successfully!", Toast.LENGTH_SHORT).show()
+                } else if (successCount > 0) {
+                    Toast.makeText(context, "Saved $successCount of ${statusesToSave.size} statuses to Gallery successfully!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Failed to save selected statuses to gallery", Toast.LENGTH_SHORT).show()
+                }
+                clearSelection()
+            }
+        }
+    }
+
+    fun loadWhatsAppStatuses(uri: Uri? = whatsappTreeUri.value) {
+        _loadingStatuses.value = true
+        clearSelection()
+        viewModelScope.launch(Dispatchers.IO) {
+            val list = if (uri != null) {
+                WhatsAppStatusHelper.getStatusesFromTree(context, uri)
+            } else {
+                WhatsAppStatusHelper.scanLocalStatuses()
+            }
             _whatsappStatuses.value = list
             _loadingStatuses.value = false
         }

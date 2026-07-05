@@ -8,7 +8,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -580,6 +586,9 @@ fun WhatsAppTab(viewModel: MainViewModel) {
     val treeUri by viewModel.whatsappTreeUri.collectAsStateWithLifecycle()
     val statuses by viewModel.whatsappStatuses.collectAsStateWithLifecycle()
     val isLoading by viewModel.loadingStatuses.collectAsStateWithLifecycle()
+    val detectedFolders by viewModel.detectedFolders.collectAsStateWithLifecycle()
+    val selectedStatusUris by viewModel.selectedStatusUris.collectAsStateWithLifecycle()
+    val isSelectionMode by viewModel.isSelectionMode.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     // Register SAF open tree intent launcher
@@ -588,19 +597,24 @@ fun WhatsAppTab(viewModel: MainViewModel) {
     ) { uri ->
         if (uri != null) {
             // Take persistable permission
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
-            viewModel.setWhatsAppTreeUri(uri)
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+                viewModel.setWhatsAppTreeUri(uri)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
-    if (treeUri == null) {
+    if (treeUri == null && statuses.isEmpty()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp),
+                .padding(24.dp)
+                .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
@@ -626,6 +640,45 @@ fun WhatsAppTab(viewModel: MainViewModel) {
                 textAlign = TextAlign.Center,
                 lineHeight = 20.sp
             )
+
+            // Detected Folders list
+            if (detectedFolders.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = ElegantCard.copy(alpha = 0.5f)),
+                    border = BorderStroke(1.dp, ElegantAccent.copy(alpha = 0.3f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Detected Installed Storage:",
+                            fontWeight = FontWeight.Bold,
+                            color = ElegantTextLight,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            detectedFolders.forEach { folder ->
+                                Box(
+                                    modifier = Modifier
+                                        .background(ElegantAccent.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
+                                        .border(BorderStroke(1.dp, ElegantAccent.copy(alpha = 0.4f)), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(folder, color = ElegantAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(24.dp))
             
             // Onboarding Guide Card
@@ -669,14 +722,95 @@ fun WhatsAppTab(viewModel: MainViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "WhatsApp Statuses",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    color = ElegantTextLight
-                )
-                IconButton(onClick = { viewModel.loadWhatsAppStatuses() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = ElegantAccent)
+                if (isSelectionMode) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        IconButton(
+                            onClick = { viewModel.clearSelection() },
+                            modifier = Modifier.testTag("exit_selection_button")
+                        ) {
+                            Icon(Icons.Filled.Close, contentDescription = "Exit selection", tint = ElegantTextLight)
+                        }
+                        Column {
+                            Text(
+                                text = "${selectedStatusUris.size} Selected",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                color = ElegantTextLight
+                            )
+                            Text(
+                                text = "Tap items to select",
+                                fontSize = 11.sp,
+                                color = ElegantAccent
+                            )
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val allSelected = statuses.isNotEmpty() && selectedStatusUris.size == statuses.size
+                        IconButton(
+                            onClick = {
+                                if (allSelected) {
+                                    viewModel.clearSelection()
+                                } else {
+                                    viewModel.selectAllStatuses()
+                                }
+                            },
+                            modifier = Modifier.testTag("select_all_toggle_button")
+                        ) {
+                            Icon(
+                                imageVector = if (allSelected) Icons.Filled.Deselect else Icons.Filled.SelectAll,
+                                contentDescription = if (allSelected) "Deselect All" else "Select All",
+                                tint = ElegantAccent
+                            )
+                        }
+                        IconButton(
+                            onClick = { viewModel.saveSelectedStatuses() },
+                            enabled = selectedStatusUris.isNotEmpty(),
+                            modifier = Modifier.testTag("batch_save_header_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.ArrowDownward,
+                                contentDescription = "Save Selected",
+                                tint = if (selectedStatusUris.isNotEmpty()) ElegantAccent else ElegantTextMuted
+                            )
+                        }
+                    }
+                } else {
+                    Column {
+                        Text(
+                            text = "WhatsApp Statuses",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = ElegantTextLight
+                        )
+                        Text(
+                            text = if (treeUri != null) "Folder: Custom SAF Path" else "Auto-Scanned Local Folder",
+                            fontSize = 11.sp,
+                            color = if (treeUri != null) ElegantTextMuted else ElegantAccent
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = { viewModel.toggleSelectionMode() },
+                            modifier = Modifier.testTag("toggle_selection_mode_button")
+                        ) {
+                            Icon(Icons.Filled.DoneAll, contentDescription = "Select Multiple", tint = ElegantTextMuted)
+                        }
+                        if (treeUri != null) {
+                            IconButton(onClick = { viewModel.clearWhatsAppTreeUri() }) {
+                                Icon(Icons.Filled.FolderOff, contentDescription = "Clear custom folder", tint = ElegantTextMuted)
+                            }
+                        } else {
+                            IconButton(onClick = { safLauncher.launch(null) }) {
+                                Icon(Icons.Filled.FolderOpen, contentDescription = "Grant folder permission", tint = ElegantTextMuted)
+                            }
+                        }
+                        IconButton(onClick = { viewModel.loadWhatsAppStatuses() }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = ElegantAccent)
+                        }
+                    }
                 }
             }
 
@@ -700,14 +834,100 @@ fun WhatsAppTab(viewModel: MainViewModel) {
                     }
                 }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(statuses) { status ->
-                        StatusItemCard(status = status, onSaveClick = { viewModel.saveStatus(status) })
+                Box(modifier = Modifier.fillMaxSize()) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 88.dp)
+                    ) {
+                        items(statuses) { status ->
+                            val isSelected = selectedStatusUris.contains(status.uri)
+                            StatusItemCard(
+                                status = status,
+                                isSelected = isSelected,
+                                isSelectionMode = isSelectionMode,
+                                onToggleSelect = { viewModel.toggleStatusSelection(status) },
+                                onSaveClick = { viewModel.saveStatus(status) }
+                            )
+                        }
+                    }
+
+                    // Bottom Floating Multi-Save Control Bar
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = isSelectionMode,
+                        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 8.dp)
+                    ) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(64.dp)
+                                .padding(horizontal = 4.dp),
+                            shape = RoundedCornerShape(32.dp),
+                            colors = CardDefaults.cardColors(containerColor = ElegantCard),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                            border = BorderStroke(1.dp, ElegantAccent.copy(alpha = 0.5f))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${selectedStatusUris.size} Selected",
+                                    color = ElegantTextLight,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Button(
+                                        onClick = { viewModel.clearSelection() },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color.Transparent,
+                                            contentColor = ElegantTextMuted
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        modifier = Modifier.testTag("multi_cancel_button")
+                                    ) {
+                                        Text("Cancel", fontSize = 13.sp)
+                                    }
+                                    
+                                    Button(
+                                        onClick = { viewModel.saveSelectedStatuses() },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = ElegantAccent,
+                                            contentColor = ElegantOnPrimary
+                                        ),
+                                        shape = RoundedCornerShape(20.dp),
+                                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                                        modifier = Modifier.testTag("multi_save_button"),
+                                        enabled = selectedStatusUris.isNotEmpty()
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.ArrowDownward,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text("Save Selected", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -715,14 +935,36 @@ fun WhatsAppTab(viewModel: MainViewModel) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun StatusItemCard(status: StatusMedia, onSaveClick: () -> Unit) {
+fun StatusItemCard(
+    status: StatusMedia,
+    isSelected: Boolean,
+    isSelectionMode: Boolean,
+    onToggleSelect: () -> Unit,
+    onSaveClick: () -> Unit
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(0.75f),
+            .aspectRatio(0.75f)
+            .testTag("status_item_card_${status.name}")
+            .combinedClickable(
+                onClick = {
+                    if (isSelectionMode) {
+                        onToggleSelect()
+                    } else {
+                        // Enter selection mode and select item on single click for best UX
+                        onToggleSelect()
+                    }
+                },
+                onLongClick = {
+                    onToggleSelect()
+                }
+            ),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = ElegantCard)
+        colors = CardDefaults.cardColors(containerColor = ElegantCard),
+        border = if (isSelected) BorderStroke(2.dp, ElegantAccent) else null
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             // Preview thumbnail using Coil AsyncImage
@@ -758,21 +1000,93 @@ fun StatusItemCard(status: StatusMedia, onSaveClick: () -> Unit) {
                 }
             }
 
-            // Save floating action button overlay
-            Box(
+            // Selection indicator overlay (Top End)
+            if (isSelectionMode || isSelected) {
+                Box(
+                    modifier = Modifier
+                        .padding(8.dp)
+                        .align(Alignment.TopEnd)
+                        .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                        .padding(2.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isSelected) Icons.Filled.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                        contentDescription = if (isSelected) "Selected" else "Not selected",
+                        tint = if (isSelected) ElegantAccent else Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            // Bottom descriptive overlay with "Save to Gallery" button
+            Column(
                 modifier = Modifier
-                    .padding(8.dp)
-                    .align(Alignment.BottomEnd)
-                    .background(ElegantAccent, RoundedCornerShape(12.dp))
-                    .clickable { onSaveClick() }
-                    .padding(8.dp)
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.5f),
+                                Color.Black.copy(alpha = 0.85f)
+                            )
+                        )
+                    )
+                    .padding(12.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Filled.ArrowDownward,
-                    contentDescription = "Save status",
-                    tint = ElegantOnPrimary,
-                    modifier = Modifier.size(20.dp)
+                Text(
+                    text = status.name,
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontWeight = FontWeight.Medium
                 )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = formatFileSize(status.size),
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 10.sp
+                    )
+                    
+                    // Styled "Save to Gallery" button (only visible when not in selection mode to avoid visual clutter)
+                    if (!isSelectionMode) {
+                        Button(
+                            onClick = onSaveClick,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = ElegantAccent,
+                                contentColor = ElegantOnPrimary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .height(30.dp)
+                                .testTag("save_to_gallery_button_${status.name}"),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.ArrowDownward,
+                                    contentDescription = "Save to Gallery",
+                                    tint = ElegantOnPrimary,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = "Save",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -822,6 +1136,69 @@ fun FileManagerTab(viewModel: MainViewModel) {
                     Text(
                         text = "${rawDownloads.size} files",
                         color = ElegantAccent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = ElegantCard.copy(alpha = 0.8f)),
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, ElegantOutline.copy(alpha = 0.5f))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteSweep,
+                        contentDescription = "Auto Cleanup Status",
+                        tint = ElegantAccent,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "Auto-Cleanup Active",
+                            color = ElegantTextLight,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Clears WhatsApp and cache files older than 30 days automatically.",
+                            color = ElegantTextMuted,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp
+                        )
+                    }
+                }
+                Button(
+                    onClick = {
+                        com.example.data.StatusCacheCleanupWorker.runOnce(context)
+                        Toast.makeText(context, "Cleanup task enqueued successfully!", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = ElegantAccent),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier
+                        .height(36.dp)
+                        .testTag("manual_cleanup_button")
+                ) {
+                    Text(
+                        text = "Clean Now",
+                        color = ElegantOnPrimary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )

@@ -19,4 +19,7 @@ interface DownloadDao {
 
     @Query("SELECT * FROM downloads WHERE id = :id LIMIT 1")
     suspend fun getDownloadById(id: Int): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE platform = :platform")
+    suspend fun getDownloadsByPlatform(platform: String): List<DownloadEntity>
 }

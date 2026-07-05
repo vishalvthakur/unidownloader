@@ -15,7 +15,9 @@ import com.example.ui.MainViewModel
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
-    private val viewModel: MainViewModel by viewModels()
+    private val viewModel: MainViewModel by viewModels {
+        MainViewModel.Factory(application)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -23,6 +25,9 @@ class MainActivity : ComponentActivity() {
         
         // Request notification permission for modern Android levels (foreground service progress visibility)
         requestNotificationPermission()
+
+        // Schedule WhatsApp status and temporary cache automatic cleanup
+        com.example.data.StatusCacheCleanupWorker.schedule(applicationContext)
 
         setContent {
             MyApplicationTheme {
