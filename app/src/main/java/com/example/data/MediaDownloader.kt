@@ -10,6 +10,9 @@ import android.provider.MediaStore
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -33,6 +36,11 @@ object MediaDownloader {
     private val downloadClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
+        .build()
+
+    private val healthCheckClient = OkHttpClient.Builder()
+        .connectTimeout(1500, TimeUnit.MILLISECONDS)
+        .readTimeout(1500, TimeUnit.MILLISECONDS)
         .build()
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
@@ -105,22 +113,41 @@ object MediaDownloader {
                             }
                             .toList()
 
-                        for (host in uniqueHosts) {
-                            val url = "https://$host/"
-                            if (!list.contains(url)) {
-                                list.add(url)
-                            }
+                        val verifiedActiveList = coroutineScope {
+                            uniqueHosts.map { host ->
+                                async {
+                                    val url = "https://$host/"
+                                    try {
+                                        val req = Request.Builder()
+                                            .url(url)
+                                            .head()
+                                            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                                            .build()
+                                        healthCheckClient.newCall(req).execute().use { response ->
+                                            if (response.isSuccessful || response.code in listOf(405, 400, 401, 403)) {
+                                                url
+                                            } else {
+                                                Log.d(TAG, "Health check failed for $url: HTTP ${response.code}")
+                                                null
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.d(TAG, "Health check failed for $url: ${e.localizedMessage}")
+                                        null
+                                    }
+                                }
+                            }.awaitAll().filterNotNull()
                         }
-                        
-                        if (list.isNotEmpty()) {
-                            Log.d(TAG, "Successfully extracted ${list.size} dynamic instances from cobalt.directory: $list")
+
+                        if (verifiedActiveList.isNotEmpty()) {
+                            Log.d(TAG, "Successfully extracted and verified ${verifiedActiveList.size} dynamic instances from cobalt.directory: $verifiedActiveList")
                             // Prioritize our known tested working endpoints at the very front of the list,
                             // but append the others so we have massive fallbacks!
                             val combined = mutableListOf<String>()
                             for (def in defaultInstances) {
                                 combined.add(def)
                             }
-                            for (item in list) {
+                            for (item in verifiedActiveList) {
                                 if (!combined.contains(item)) {
                                     combined.add(item)
                                 }
@@ -174,7 +201,10 @@ object MediaDownloader {
                         return@withContext result
                     }
                     is DownloadResult.Error -> {
-                        lastError = result.message
+                        val isInfra = isInfrastructureError(result.message)
+                        if (!isInfra || lastError.isEmpty() || isInfrastructureError(lastError) || lastError.contains("No working Cobalt server")) {
+                            lastError = result.message
+                        }
                         // If the error is NOT a 400 bad request, don't waste time with other payload attempts on this server; try next server
                         if (!result.message.contains("HTTP 400") && !result.message.contains("Server error: HTTP 400")) {
                             break
@@ -185,6 +215,19 @@ object MediaDownloader {
         }
         
         return@withContext DownloadResult.Error(lastError)
+    }
+
+    private fun isInfrastructureError(message: String): Boolean {
+        val msg = message.lowercase()
+        return msg.contains("521") || 
+               msg.contains("502") || 
+               msg.contains("503") || 
+               msg.contains("522") || 
+               msg.contains("unable to resolve") || 
+               msg.contains("timeout") || 
+               msg.contains("connect") || 
+               msg.contains("failed to connect") ||
+               msg.contains("socket")
     }
 
     private suspend fun makeSingleRequest(
