@@ -441,6 +441,137 @@ fun DownloaderTab(viewModel: MainViewModel) {
                 }
             }
         }
+
+        // Advanced Engine Settings
+        item {
+            var expanded by remember { mutableStateOf(false) }
+            val currentEngineUrl by viewModel.cobaltEngineUrl.collectAsStateWithLifecycle()
+            
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+                colors = CardDefaults.cardColors(containerColor = ElegantCard),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(Icons.Default.Settings, contentDescription = "Settings", tint = ElegantAccent)
+                            Column {
+                                Text(
+                                    "Advanced Engine Settings",
+                                    fontWeight = FontWeight.Bold,
+                                    color = ElegantTextLight,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    "Configure download server engines",
+                                    color = ElegantTextMuted,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (expanded) "Collapse" else "Expand",
+                            tint = ElegantTextMuted
+                        )
+                    }
+                    
+                    if (expanded) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        Text(
+                            "Preferred Cobalt Instance:",
+                            color = ElegantTextLight,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        val standardInstances = listOf(
+                            "Auto-Fallback (Recommended)" to "auto",
+                            "Official Server" to "https://api.cobalt.tools/",
+                            "Ryb.me Community" to "https://cobalt.api.ryb.me/",
+                            "Chunky Club" to "https://cobalt.chunky.club/",
+                            "Kuss Pub" to "https://cobalt-api.kuss.pub/",
+                            "Cobalt.sh" to "https://api.cobalt.sh/"
+                        )
+                        
+                        standardInstances.forEach { (name, value) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { viewModel.setCobaltEngineUrl(value) }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = currentEngineUrl == value,
+                                    onClick = { viewModel.setCobaltEngineUrl(value) },
+                                    colors = RadioButtonDefaults.colors(
+                                        selectedColor = ElegantAccent,
+                                        unselectedColor = ElegantOutline
+                                    )
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(name, color = ElegantTextLight, fontSize = 13.sp)
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        var customInput by remember {
+                            mutableStateOf(
+                                if (currentEngineUrl != "auto" && standardInstances.none { it.second == currentEngineUrl }) {
+                                    currentEngineUrl
+                                } else {
+                                    ""
+                                }
+                            )
+                        }
+                        
+                        OutlinedTextField(
+                            value = customInput,
+                            onValueChange = { 
+                                customInput = it
+                                if (it.isNotEmpty() && it.startsWith("http")) {
+                                    viewModel.setCobaltEngineUrl(it)
+                                }
+                            },
+                            label = { Text("Custom Server URL", color = ElegantTextMuted) },
+                            placeholder = { Text("https://api.example.com/", color = ElegantTextMuted) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = ElegantTextLight,
+                                unfocusedTextColor = ElegantTextLight,
+                                focusedBorderColor = ElegantAccent,
+                                unfocusedBorderColor = ElegantOutline,
+                                focusedContainerColor = ElegantSecondaryCard,
+                                unfocusedContainerColor = ElegantSecondaryCard
+                            )
+                        )
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            "If the active server experiences issues or blocks downloads, Auto-Fallback mode will dynamically search and use working public instances to ensure your download succeeds.",
+                            fontSize = 11.sp,
+                            color = ElegantTextMuted,
+                            lineHeight = 15.sp
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -58,10 +58,14 @@ class DownloadService : Service() {
                 Toast.makeText(applicationContext, "Starting original quality download...", Toast.LENGTH_SHORT).show()
             }
 
+            val prefs = applicationContext.getSharedPreferences("downloader_prefs", Context.MODE_PRIVATE)
+            val preferredEngineUrl = prefs.getString("cobalt_engine_url", "auto") ?: "auto"
+
             val result = MediaDownloader.downloadMedia(
                 context = applicationContext,
                 url = url,
                 repository = repository,
+                preferredEngineUrl = preferredEngineUrl,
                 onProgress = { progress ->
                     updateNotification(progress)
                 }

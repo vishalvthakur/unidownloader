@@ -27,6 +27,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Tab state
     var currentTab = MutableStateFlow(0) // 0: Downloader, 1: WhatsApp, 2: File Manager
 
+    // Cobalt custom engine URL configuration
+    val cobaltEngineUrl = MutableStateFlow(prefs.getString("cobalt_engine_url", "auto") ?: "auto")
+
+    fun setCobaltEngineUrl(url: String) {
+        cobaltEngineUrl.value = url
+        prefs.edit().putString("cobalt_engine_url", url).apply()
+    }
+
     // Manual Download state
     sealed class DownloadState {
         object Idle : DownloadState()
@@ -101,6 +109,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 context = context,
                 url = url,
                 repository = repository,
+                preferredEngineUrl = cobaltEngineUrl.value,
                 onProgress = { progress ->
                     _manualDownloadState.value = DownloadState.Downloading(progress)
                 }

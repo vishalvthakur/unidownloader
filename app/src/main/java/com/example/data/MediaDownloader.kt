@@ -35,6 +35,45 @@ object MediaDownloader {
         data class Error(val message: String) : DownloadResult()
     }
 
+    private suspend fun fetchActiveInstances(): List<String> = withContext(Dispatchers.IO) {
+        val defaultInstances = listOf(
+            "https://api.cobalt.tools/",
+            "https://cobalt.api.ryb.me/",
+            "https://cobalt.chunky.club/",
+            "https://api.cobalt.sh/",
+            "https://cobalt-api.kuss.pub/"
+        )
+        try {
+            val request = Request.Builder()
+                .url("https://cobalt.directory/api/instances")
+                .get()
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    if (!body.isNullOrEmpty()) {
+                        val jsonArray = org.json.JSONArray(body)
+                        val list = mutableListOf<String>()
+                        for (i in 0 until jsonArray.length()) {
+                            val obj = jsonArray.getJSONObject(i)
+                            val url = obj.optString("url", "")
+                            val isUp = obj.optBoolean("up", true)
+                            // Clean slash
+                            if (url.isNotEmpty() && isUp) {
+                                val cleanUrl = if (url.endsWith("/")) url else "$url/"
+                                list.add(cleanUrl)
+                            }
+                        }
+                        if (list.isNotEmpty()) return@withContext list
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch dynamic instances from cobalt.directory, using defaults", e)
+        }
+        return@withContext defaultInstances
+    }
+
     /**
      * Extracts direct stream URL from Cobalt API and downloads it to the public gallery.
      */
@@ -42,40 +81,112 @@ object MediaDownloader {
         context: Context,
         url: String,
         repository: DownloadRepository,
+        preferredEngineUrl: String = "auto",
         onProgress: (Int) -> Unit = {}
     ): DownloadResult = withContext(Dispatchers.IO) {
-        try {
-            Log.d(TAG, "Requesting Cobalt API for url: $url")
+        // Resolve list of base instances to try
+        val instances = mutableListOf<String>()
+        if (preferredEngineUrl != "auto" && preferredEngineUrl.isNotEmpty()) {
+            val cleanPref = if (preferredEngineUrl.endsWith("/")) preferredEngineUrl else "$preferredEngineUrl/"
+            instances.add(cleanPref)
+        }
+        
+        // Add dynamic/default fallback instances to the pool
+        val fetched = fetchActiveInstances()
+        for (f in fetched) {
+            if (!instances.contains(f)) {
+                instances.add(f)
+            }
+        }
+
+        var lastError = "No working Cobalt server could process this download request."
+        
+        for (baseUrl in instances) {
+            Log.d(TAG, "Attempting download using server: $baseUrl")
             
-            // Standard Cobalt API request body
-            val jsonBody = JSONObject().apply {
+            // Try different payload formats for the current instance (from strict to compatible)
+            for (payloadAttempt in 0..2) {
+                val result = makeSingleRequest(context, baseUrl, url, repository, payloadAttempt, onProgress)
+                when (result) {
+                    is DownloadResult.Success -> {
+                        return@withContext result
+                    }
+                    is DownloadResult.Error -> {
+                        lastError = result.message
+                        // If the error is NOT a 400 bad request, don't waste time with other payload attempts on this server; try next server
+                        if (!result.message.contains("HTTP 400") && !result.message.contains("Server error: HTTP 400")) {
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        
+        return@withContext DownloadResult.Error(lastError)
+    }
+
+    private suspend fun makeSingleRequest(
+        context: Context,
+        baseUrl: String,
+        url: String,
+        repository: DownloadRepository,
+        payloadAttempt: Int,
+        onProgress: (Int) -> Unit
+    ): DownloadResult = withContext(Dispatchers.IO) {
+        try {
+            val jsonBody = org.json.JSONObject().apply {
                 put("url", url)
-                put("videoQuality", "max") // Original quality
-                put("downloadMode", "auto") // Auto detect video/audio/photo
+                when (payloadAttempt) {
+                    0 -> {
+                        // Classic v7 standard
+                        put("videoQuality", "max")
+                        put("downloadMode", "auto")
+                    }
+                    1 -> {
+                        // Modern v10 standard
+                        put("vQuality", "max")
+                    }
+                    2 -> {
+                        // Absolute minimal parameters (max compatibility)
+                    }
+                }
             }
 
             val request = Request.Builder()
-                .url("https://api.cobalt.tools/")
+                .url(baseUrl)
                 .post(jsonBody.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
                 .build()
 
             client.newCall(request).execute().use { response ->
+                val responseBodyStr = response.body?.string() ?: ""
+                
                 if (!response.isSuccessful) {
-                    return@withContext DownloadResult.Error("API server responded with error: ${response.code}")
+                    Log.e(TAG, "Server $baseUrl (attempt $payloadAttempt) returned error ${response.code}: $responseBodyStr")
+                    
+                    var errorDetails = "HTTP ${response.code}"
+                    try {
+                        val errJson = org.json.JSONObject(responseBodyStr)
+                        val errText = errJson.optString("text", "")
+                        if (errText.isNotEmpty()) {
+                            errorDetails = errText
+                        } else {
+                            val errMsg = errJson.optString("message", "")
+                            if (errMsg.isNotEmpty()) errorDetails = errMsg
+                        }
+                    } catch (_: Exception) {}
+                    
+                    return@withContext DownloadResult.Error("Server error: HTTP ${response.code} ($errorDetails)")
                 }
 
-                val responseBodyStr = response.body?.string() ?: return@withContext DownloadResult.Error("Empty response from server")
-                val jsonResponse = JSONObject(responseBodyStr)
-
+                val jsonResponse = org.json.JSONObject(responseBodyStr)
                 val status = jsonResponse.optString("status", "error")
                 if (status == "error") {
                     val errorText = jsonResponse.optString("text", "Unknown API error")
-                    return@withContext DownloadResult.Error(errorText)
+                    return@withContext DownloadResult.Error("Server error text: $errorText")
                 }
 
-                // Cobalt API can return stream, redirect, or picker status
                 when (status) {
                     "stream", "redirect" -> {
                         val streamUrl = jsonResponse.getString("url")
@@ -83,7 +194,6 @@ object MediaDownloader {
                         return@withContext downloadDirectFile(context, streamUrl, filename, url, repository, onProgress)
                     }
                     "picker" -> {
-                        // Instagram stories or multi-slides return picker
                         val pickerArray = jsonResponse.optJSONArray("picker")
                         if (pickerArray != null && pickerArray.length() > 0) {
                             var firstSuccess: DownloadResult? = null
@@ -107,8 +217,8 @@ object MediaDownloader {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error downloading media", e)
-            return@withContext DownloadResult.Error(e.localizedMessage ?: "Unknown network error")
+            Log.e(TAG, "Error in makeSingleRequest on $baseUrl (attempt $payloadAttempt)", e)
+            return@withContext DownloadResult.Error(e.localizedMessage ?: "Network communication error on $baseUrl")
         }
     }
 
