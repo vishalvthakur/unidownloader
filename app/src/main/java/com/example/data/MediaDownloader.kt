@@ -90,6 +90,17 @@ object MediaDownloader {
                                         return@filter false
                                     }
                                 }
+
+                                // Pre-flight DNS resolution check to ensure the host is online and resolvable
+                                val isResolvable = try {
+                                    java.net.InetAddress.getByName(host) != null
+                                } catch (_: Exception) {
+                                    false
+                                }
+                                if (!isResolvable) {
+                                    Log.d(TAG, "Skipping unresolvable host: $host")
+                                    return@filter false
+                                }
                                 true
                             }
                             .toList()
